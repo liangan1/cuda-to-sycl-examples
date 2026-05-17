@@ -4,6 +4,13 @@
 // one-element-per-work-item kernel against the vectorized (sycl::vec<float,4>
 // + tile-per-workgroup + scalar-tail) kernel.
 //
+// Both kernels are SYCL **free-function kernels**
+// (sycl_ext_oneapi_free_function_kernels), to stay symmetric with
+// silu.sycl.cpp (step 1) and silu_vectorized.sycl.cpp (step 3) — each kernel
+// is a plain top-level function marked with
+// SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((nd_range_kernel<1>)), the direct
+// counterpart of a CUDA `__global__`.
+//
 // Methodology follows the standard memory-bound bench used by tools like
 // bytedance/xpu-perf:
 //   - allocate input/output device buffers
@@ -24,6 +31,8 @@
 //   ./silu_bench --size 1048576            # single size
 
 #include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/experimental/free_function_traits.hpp>
+#include <sycl/ext/oneapi/free_function_queries.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -32,9 +41,13 @@
 #include <string>
 #include <vector>
 
+namespace syclex = sycl::ext::oneapi::experimental;
+namespace syclwi = sycl::ext::oneapi::this_work_item;
+
 // ---------------------------------------------------------------------------
-// Kernels (copies of silu.sycl.cpp + silu_vectorized.sycl.cpp, inlined here
-// so the bench is single-file. See those files for the annotated originals.)
+// Kernels (free-function form — same shape as CUDA __global__)
+// Copies of silu.sycl.cpp + silu_vectorized.sycl.cpp, inlined here so the
+// bench is single-file. See those files for the annotated originals.
 // ---------------------------------------------------------------------------
 
 static inline float silu_op(float v) {
@@ -42,15 +55,13 @@ static inline float silu_op(float v) {
 }
 
 // Naive: one element per work-item, no vectorization, no tile awareness.
-struct SiluNaiveKernel {
-    const float* x;
-    float*       y;
-    int          N;
-    void operator()(sycl::nd_item<1> item) const {
-        int i = item.get_global_id(0);
-        if (i < N) y[i] = silu_op(x[i]);
-    }
-};
+SYCL_EXTERNAL
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+void silu_naive_kernel(const float* x, float* y, int N) {
+    auto item = syclwi::get_nd_item<1>();
+    int i = item.get_global_id(0);
+    if (i < N) y[i] = silu_op(x[i]);
+}
 
 // Vectorized: tile-per-workgroup, sycl::vec<float,4> aligned load/store,
 // scalar tail. Mirror of PyTorch CUDA's vectorized_elementwise_kernel.
@@ -58,39 +69,46 @@ constexpr int kVecSize    = 4;
 constexpr int kWgSizeVec  = 256;
 constexpr int kBlockWork  = kVecSize * kWgSizeVec;
 
-template <int VEC>
-struct SiluVectorizedKernel {
-    const float* x;
-    float*       y;
-    int          N;
-    void operator()(sycl::nd_item<1> item) const {
-        int grpid = item.get_group(0);
-        int lid   = item.get_local_id(0);
-        int wgsz  = item.get_local_range(0);
+SYCL_EXTERNAL
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+void silu_vec_kernel(const float* x, float* y, int N) {
+    auto item = syclwi::get_nd_item<1>();
+    int grpid = item.get_group(0);
+    int lid   = item.get_local_id(0);
+    int wgsz  = item.get_local_range(0);
 
-        int tile_base = grpid * kBlockWork;
-        int remaining = N - tile_base;
+    int tile_base = grpid * kBlockWork;
+    int remaining = N - tile_base;
 
-        if (remaining >= kBlockWork) {
-            int base = tile_base + lid * VEC;
-            using vec_t = sycl::vec<float, VEC>;
-            vec_t in;
-            in.load(0, sycl::multi_ptr<const float,
-                        sycl::access::address_space::global_space>(x + base));
-            vec_t out;
-            #pragma unroll
-            for (int j = 0; j < VEC; ++j) out[j] = silu_op(in[j]);
-            out.store(0, sycl::multi_ptr<float,
-                         sycl::access::address_space::global_space>(y + base));
-        } else {
-            #pragma unroll
-            for (int j = 0; j < VEC; ++j) {
-                int i = tile_base + lid + j * wgsz;
-                if (i < N) y[i] = silu_op(x[i]);
-            }
+    if (remaining >= kBlockWork) {
+        int base = tile_base + lid * kVecSize;
+        using vec_t = sycl::vec<float, kVecSize>;
+        vec_t in;
+        in.load(0, sycl::multi_ptr<const float,
+                    sycl::access::address_space::global_space>(x + base));
+        vec_t out;
+        #pragma unroll
+        for (int j = 0; j < kVecSize; ++j) out[j] = silu_op(in[j]);
+        out.store(0, sycl::multi_ptr<float,
+                     sycl::access::address_space::global_space>(y + base));
+    } else {
+        #pragma unroll
+        for (int j = 0; j < kVecSize; ++j) {
+            int i = tile_base + lid + j * wgsz;
+            if (i < N) y[i] = silu_op(x[i]);
         }
     }
-};
+}
+
+// Trivial init kernel — fill x with (i%200-100)*0.01f. Also a free function
+// for consistency.
+SYCL_EXTERNAL
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+void init_kernel(float* x, int N) {
+    auto item = syclwi::get_nd_item<1>();
+    int i = item.get_global_id(0);
+    if (i < N) x[i] = ((i % 200) - 100) * 0.01f;
+}
 
 // ---------------------------------------------------------------------------
 // Bench harness
@@ -141,14 +159,25 @@ struct RunResult {
     BenchStats   vec;
 };
 
-static RunResult run_one_size(sycl::queue& q, int N, int warmup, int iters) {
+static RunResult run_one_size(sycl::queue& q,
+                              sycl::kernel& k_naive,
+                              sycl::kernel& k_vec,
+                              sycl::kernel& k_init,
+                              int N, int warmup, int iters) {
     float* d_x = sycl::malloc_device<float>(N, q);
     float* d_y = sycl::malloc_device<float>(N, q);
 
-    // Init x on device with a simple pattern (any non-trivial values).
-    q.parallel_for(sycl::range<1>(N), [=](sycl::id<1> i){
-        d_x[int(i)] = ((int(i) % 200) - 100) * 0.01f;
-    }).wait();
+    // Init x via the init free-function kernel.
+    {
+        constexpr int kWgInit = 256;
+        int grid = (N + kWgInit - 1) / kWgInit;
+        sycl::nd_range<1> ndr{sycl::range<1>(size_t(grid) * kWgInit),
+                              sycl::range<1>(kWgInit)};
+        q.submit([&](sycl::handler& h) {
+            h.set_args(d_x, N);
+            h.parallel_for(ndr, k_init);
+        }).wait();
+    }
 
     // Naive launch.
     constexpr int kWgSizeNaive = 256;
@@ -158,7 +187,8 @@ static RunResult run_one_size(sycl::queue& q, int N, int warmup, int iters) {
         sycl::range<1>(kWgSizeNaive)};
     auto submit_naive = [&]() {
         return q.submit([&](sycl::handler& h) {
-            h.parallel_for(ndr_naive, SiluNaiveKernel{d_x, d_y, N});
+            h.set_args(d_x, d_y, N);
+            h.parallel_for(ndr_naive, k_naive);
         });
     };
 
@@ -169,7 +199,8 @@ static RunResult run_one_size(sycl::queue& q, int N, int warmup, int iters) {
         sycl::range<1>(kWgSizeVec)};
     auto submit_vec = [&]() {
         return q.submit([&](sycl::handler& h) {
-            h.parallel_for(ndr_vec, SiluVectorizedKernel<kVecSize>{d_x, d_y, N});
+            h.set_args(d_x, d_y, N);
+            h.parallel_for(ndr_vec, k_vec);
         });
     };
 
@@ -232,6 +263,12 @@ int main(int argc, char** argv) {
     if (peak_gbps > 0) std::printf("Peak HBM (user)     : %.1f GB/s\n", peak_gbps);
     std::printf("\n");
 
+    // Resolve free-function kernels once (kernel bundle is process-wide).
+    auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(q.get_context());
+    sycl::kernel k_naive = bundle.ext_oneapi_get_kernel<silu_naive_kernel>();
+    sycl::kernel k_vec   = bundle.ext_oneapi_get_kernel<silu_vec_kernel>();
+    sycl::kernel k_init  = bundle.ext_oneapi_get_kernel<init_kernel>();
+
     // Header
     if (peak_gbps > 0) {
         std::printf("%12s | %30s | %30s | %8s\n",
@@ -250,7 +287,7 @@ int main(int argc, char** argv) {
     }
 
     for (int N : sizes) {
-        auto r = run_one_size(q, N, warmup, iters);
+        auto r = run_one_size(q, k_naive, k_vec, k_init, N, warmup, iters);
         double naive_gbps = gbps(N, r.naive.min_ms);
         double vec_gbps   = gbps(N, r.vec.min_ms);
         double speedup    = r.naive.min_ms / r.vec.min_ms;

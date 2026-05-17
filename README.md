@@ -142,13 +142,13 @@ The structure of PyTorch CUDA's `vectorized_elementwise_kernel` extracted into
 a self-contained single file (no `TensorIterator`, no dtype dispatch). Same
 two-branch shape; ports to SYCL line-for-line.
 
-| Concept                | CUDA                                              | SYCL                                                                          |
+| Concept                | CUDA                                              | SYCL (free-function kernel)                                                   |
 | ---------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Kernel marker          | `__global__`                                      | `struct K { void operator()(sycl::nd_item<1>) const; }` (named functor)        |
-| Block / thread index   | `blockIdx.x` / `threadIdx.x` / `blockDim.x`       | `item.get_group(0)` / `get_local_id(0)` / `get_local_range(0)`                |
+| Kernel marker          | `__global__`                                      | `SYCL_EXTERNAL SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((nd_range_kernel<1>)) void k(...)` (top-level function, same as step 1) |
+| Block / thread index   | `blockIdx.x` / `threadIdx.x` / `blockDim.x`       | `auto it = syclwi::get_nd_item<1>(); it.get_group(0) / get_local_id(0) / get_local_range(0)` |
 | 128-bit aligned load   | `float4 in = *reinterpret_cast<const float4*>(p)` | `sycl::vec<float,4> v; v.load(0, multi_ptr<…global_space>(p))`                |
 | 128-bit aligned store  | `*reinterpret_cast<float4*>(p) = out`             | `v.store(0, multi_ptr<…global_space>(p))`                                     |
-| Launch                 | `kernel<<<grid, BLOCK>>>(args)`                   | `q.parallel_for(nd_range<1>{grid*BLOCK, BLOCK}, K{args…})`                    |
+| Launch                 | `kernel<<<grid, BLOCK>>>(args)`                   | `auto k = bundle.ext_oneapi_get_kernel<kernel>(); h.set_args(args); h.parallel_for(ndr, k);` |
 | Math intrinsic         | `__expf(-v)`                                      | `sycl::exp(-v)`                                                               |
 
 **CUDA** ([silu/vectorized/silu_vectorized.cu](silu/vectorized/silu_vectorized.cu)):
@@ -176,41 +176,41 @@ __global__ void silu_vectorized_kernel(const float* __restrict__ x,
 }
 ```
 
-**SYCL** ([silu/vectorized/silu_vectorized.sycl.cpp](silu/vectorized/silu_vectorized.sycl.cpp)):
+**SYCL** ([silu/vectorized/silu_vectorized.sycl.cpp](silu/vectorized/silu_vectorized.sycl.cpp)) — **free-function kernel**:
 ```cpp
-template <int VEC>
-struct SiluVectorizedKernel {
-    const float* x;  float* y;  int N;
-    void operator()(sycl::nd_item<1> item) const {
-        int grpid = item.get_group(0);
-        int lid   = item.get_local_id(0);
-        int wgsz  = item.get_local_range(0);
-        int tile_base = grpid * kBlockWork;
-        int remaining = N - tile_base;
-        if (remaining >= kBlockWork) {
-            int base = tile_base + lid * VEC;
-            using vec_t = sycl::vec<float, VEC>;
-            vec_t in;
-            in.load(0, sycl::multi_ptr<const float,
-                        sycl::access::address_space::global_space>(x + base));
-            vec_t out;
-            #pragma unroll
-            for (int j = 0; j < VEC; ++j) out[j] = silu_op(in[j]);
-            out.store(0, sycl::multi_ptr<float,
-                         sycl::access::address_space::global_space>(y + base));
-        } else {
-            #pragma unroll
-            for (int j = 0; j < VEC; ++j) {
-                int i = tile_base + lid + j * wgsz;
-                if (i < N) y[i] = silu_op(x[i]);
-            }
+SYCL_EXTERNAL
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+void silu_vectorized_kernel(const float* x, float* y, int N) {
+    auto item = syclwi::get_nd_item<1>();
+    int grpid = item.get_group(0);
+    int lid   = item.get_local_id(0);
+    int wgsz  = item.get_local_range(0);
+    int tile_base = grpid * kBlockWork;
+    int remaining = N - tile_base;
+    if (remaining >= kBlockWork) {
+        int base = tile_base + lid * kVecSize;
+        using vec_t = sycl::vec<float, kVecSize>;
+        vec_t in;
+        in.load(0, sycl::multi_ptr<const float,
+                    sycl::access::address_space::global_space>(x + base));
+        vec_t out;
+        #pragma unroll
+        for (int j = 0; j < kVecSize; ++j) out[j] = silu_op(in[j]);
+        out.store(0, sycl::multi_ptr<float,
+                     sycl::access::address_space::global_space>(y + base));
+    } else {
+        #pragma unroll
+        for (int j = 0; j < kVecSize; ++j) {
+            int i = tile_base + lid + j * wgsz;
+            if (i < N) y[i] = silu_op(x[i]);
         }
     }
-};
+}
 ```
 
 Same `if (remaining >= kBlockWork)` fast-path branch + scalar-tail `for` loop
-with bounds check. Same algorithm, just spelled in SYCL types.
+with bounds check. Same algorithm, just spelled as a SYCL free function
+(same kernel form as step 1) instead of a CUDA `__global__`.
 
 ---
 

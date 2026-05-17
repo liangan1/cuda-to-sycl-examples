@@ -13,17 +13,19 @@
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/experimental/free_function_traits.hpp>
 #include <sycl/ext/oneapi/experimental/enqueue_functions.hpp>
+#include <sycl/ext/oneapi/free_function_queries.hpp>
 #include <cstdio>
 #include <vector>
 #include <cmath>
 
-namespace syclex = sycl::ext::oneapi::experimental;
+namespace syclex   = sycl::ext::oneapi::experimental;
+namespace syclwi   = sycl::ext::oneapi::this_work_item;
 
 // ---- Device kernel: free function (same shape as CUDA __global__) ----------
 SYCL_EXTERNAL
 SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
 void silu_kernel(const float* x, float* y, int n) {
-    auto it = syclex::this_work_item::get_nd_item<1>();
+    auto it = syclwi::get_nd_item<1>();
     int i = it.get_global_id(0);
     if (i < n) {
         float v = x[i];
@@ -55,7 +57,7 @@ int main() {
     // Resolve the free-function kernel by its address, then enqueue it.
     auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(
         q.get_context());
-    sycl::kernel k = syclex::get_kernel<silu_kernel>(bundle);
+    sycl::kernel k = bundle.ext_oneapi_get_kernel<silu_kernel>();
 
     q.submit([&](sycl::handler& h) {
         h.set_args(d_x, d_y, N);

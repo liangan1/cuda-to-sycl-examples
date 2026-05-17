@@ -63,55 +63,60 @@ __global__ void silu_vectorized_kernel(const float* __restrict__ x,
 }
 ```
 
-SYCL ([silu_vectorized.sycl.cpp](silu_vectorized.sycl.cpp)):
+SYCL ([silu_vectorized.sycl.cpp](silu_vectorized.sycl.cpp)) — **free-function kernel**:
 ```cpp
-template <int VEC>
-struct SiluVectorizedKernel {
-    const float* x;  float* y;  int N;
-    void operator()(sycl::nd_item<1> item) const {
-        int grpid = item.get_group(0);
-        int lid   = item.get_local_id(0);
-        int wgsz  = item.get_local_range(0);
-        int tile_base = grpid * kBlockWork;
-        int remaining = N - tile_base;
-        if (remaining >= kBlockWork) {
-            int base = tile_base + lid * VEC;
-            using vec_t = sycl::vec<float, VEC>;
-            vec_t in;
-            in.load (0, sycl::multi_ptr<const float, sycl::access::address_space::global_space>(x + base));
-            vec_t out;
-            #pragma unroll
-            for (int j = 0; j < VEC; ++j) out[j] = silu_op(in[j]);
-            out.store(0, sycl::multi_ptr<float,       sycl::access::address_space::global_space>(y + base));
-        } else {
-            #pragma unroll
-            for (int j = 0; j < VEC; ++j) {
-                int i = tile_base + lid + j * wgsz;
-                if (i < N) y[i] = silu_op(x[i]);
-            }
+SYCL_EXTERNAL
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+void silu_vectorized_kernel(const float* x, float* y, int N) {
+    auto item = syclwi::get_nd_item<1>();
+    int grpid = item.get_group(0);
+    int lid   = item.get_local_id(0);
+    int wgsz  = item.get_local_range(0);
+    int tile_base = grpid * kBlockWork;
+    int remaining = N - tile_base;
+    if (remaining >= kBlockWork) {
+        int base = tile_base + lid * kVecSize;
+        using vec_t = sycl::vec<float, kVecSize>;
+        vec_t in;
+        in.load (0, sycl::multi_ptr<const float, sycl::access::address_space::global_space>(x + base));
+        vec_t out;
+        #pragma unroll
+        for (int j = 0; j < kVecSize; ++j) out[j] = silu_op(in[j]);
+        out.store(0, sycl::multi_ptr<float,       sycl::access::address_space::global_space>(y + base));
+    } else {
+        #pragma unroll
+        for (int j = 0; j < kVecSize; ++j) {
+            int i = tile_base + lid + j * wgsz;
+            if (i < N) y[i] = silu_op(x[i]);
         }
     }
-};
+}
+```
+
+Launch glue (same pattern as step 1):
+```cpp
+auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(q.get_context());
+sycl::kernel k = bundle.ext_oneapi_get_kernel<silu_vectorized_kernel>();
+q.submit([&](sycl::handler& h){ h.set_args(d_x, d_y, N); h.parallel_for(ndr, k); }).wait();
 ```
 
 The two branches are line-for-line the same shape; only the **vector type
-spelling** and the **launch wrapper** change.
+spelling** and the **launch wrapper** change. The SYCL kernel is a plain
+top-level free function (sycl_ext_oneapi_free_function_kernels), the direct
+structural counterpart of CUDA's `__global__` — same approach as step 1.
 
 ## 3. Concept mapping — vectorized layer
 
-| Concept                         | CUDA                                              | SYCL                                                                          |
-| ------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Kernel marker                   | `__global__`                                      | `struct K { void operator()(sycl::nd_item<1>) const; }` (named functor)        |
-| Captures / args                 | function parameters                               | struct fields (copied into the kernel object at submit time)                  |
-| `blockIdx.x`                    | `blockIdx.x`                                      | `item.get_group(0)`                                                           |
-| `threadIdx.x`                   | `threadIdx.x`                                     | `item.get_local_id(0)`                                                        |
-| `blockDim.x`                    | `blockDim.x`                                      | `item.get_local_range(0)`                                                     |
+| Concept                         | CUDA                                              | SYCL (free-function kernel)                                                    |
+| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Kernel marker                   | `__global__`                                      | `SYCL_EXTERNAL SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>)) void k(...)` |
+| Captures / args                 | function parameters                               | function parameters (same)                                                     |
+| Work-item coordinates           | `blockIdx.x / threadIdx.x / blockDim.x`           | `auto it = syclwi::get_nd_item<1>(); it.get_group(0) / get_local_id(0) / get_local_range(0)` |
 | 128-bit aligned load            | `float4 in = *reinterpret_cast<const float4*>(p)` | `sycl::vec<float,4> v; v.load(0, multi_ptr<…global_space>(p))`                |
 | 128-bit aligned store           | `*reinterpret_cast<float4*>(p) = out`             | `v.store(0, multi_ptr<…global_space>(p))`                                     |
 | Element access in vec           | `in.x / in.y / in.z / in.w`                       | `in[0] / in[1] / in[2] / in[3]`                                               |
 | Math intrinsic                  | `__expf(-v)`                                      | `sycl::exp(-v)`                                                               |
-| `__restrict__`                  | `__restrict__` allowed                            | `__restrict__` allowed (compiler hint, no semantic change)                    |
-| Launch                          | `kernel<<<grid, BLOCK>>>(args)`                   | `q.parallel_for(nd_range<1>{grid*BLOCK, BLOCK}, K{args…})`                    |
+| Launch                          | `kernel<<<grid, BLOCK>>>(args)`                   | `auto k = bundle.ext_oneapi_get_kernel<kernel>(); h.set_args(args); h.parallel_for(ndr, k);` |
 | Sync                            | `cudaDeviceSynchronize()`                         | `q.wait()`                                                                    |
 | Stream / queue                  | implicit / `cudaStream_t`                         | `sycl::queue`                                                                 |
 
