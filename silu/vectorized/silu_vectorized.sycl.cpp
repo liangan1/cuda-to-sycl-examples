@@ -1,0 +1,106 @@
+// silu_vectorized.sycl.cpp
+//
+// Standalone (no PyTorch) SYCL SiLU kernel that mirrors PyTorch's CUDA
+// `vectorized_elementwise_kernel` line-for-line. Compare with
+// silu_vectorized.cu in this folder — same two-branch shape, same tile size,
+// same per-thread work, just `__global__` ↔ named functor and `float4` ↔
+// `sycl::vec<float, 4>`.
+//
+//   y = x * sigmoid(x) = x / (1 + exp(-x))
+//
+// Build:
+//   icpx -fsycl -O3 -fsycl-targets=spir64 silu_vectorized.sycl.cpp \
+//        -o silu_vec_sycl
+
+#include <sycl/sycl.hpp>
+#include <cstdio>
+#include <vector>
+#include <cmath>
+
+// ---- Compile-time knobs (the µarch tuning) ---------------------------------
+//   CUDA picks kBlockSize ≈ 128 (warps × occupancy).
+//   Xe2 typically picks `syclMaxWorkItemsPerSubSlice()`; 256 is a reasonable
+//   portable default for a demo.
+constexpr int kWgSize    = 256;                  // ↔ blockDim.x
+constexpr int kVecSize   = 4;                    // 16 / sizeof(float) — same as CUDA float4
+constexpr int kBlockWork = kVecSize * kWgSize;   // ↔ io_block_work_size
+
+// ---- Element op (same line as PyTorch upstream functor) --------------------
+static inline float silu_op(float v) {
+    return v / (1.0f + sycl::exp(-v));
+}
+
+// ---- The kernel: SYCL named functor mirroring vectorized_elementwise_kernel
+template <int VEC>
+struct SiluVectorizedKernel {
+    const float* x;
+    float*       y;
+    int          N;
+
+    void operator()(sycl::nd_item<1> item) const {
+        int grpid = item.get_group(0);             // ↔ blockIdx.x
+        int lid   = item.get_local_id(0);          // ↔ threadIdx.x
+        int wgsz  = item.get_local_range(0);       // ↔ blockDim.x
+
+        int tile_base = grpid * kBlockWork;
+        int remaining = N - tile_base;
+
+        if (remaining >= kBlockWork) {
+            // -------- Fast path: aligned vector load/store ------------------
+            // Each work-item owns VEC consecutive elements in the tile.
+            // sycl::vec<float,4> lowers to a 16-B SEND on Xe2, the same
+            // shape as CUDA's float4 → 128-bit ld.global.
+            int base = tile_base + lid * VEC;
+            using vec_t = sycl::vec<float, VEC>;
+            vec_t in;
+            in.load(0, sycl::multi_ptr<const float, sycl::access::address_space::global_space>(x + base));
+            vec_t out;
+            #pragma unroll
+            for (int j = 0; j < VEC; ++j) out[j] = silu_op(in[j]);
+            out.store(0, sycl::multi_ptr<float, sycl::access::address_space::global_space>(y + base));
+        } else {
+            // -------- Tail path: scalar unroll with bounds check ------------
+            #pragma unroll
+            for (int j = 0; j < VEC; ++j) {
+                int i = tile_base + lid + j * wgsz;
+                if (i < N) y[i] = silu_op(x[i]);
+            }
+        }
+    }
+};
+
+// ---- Host driver -----------------------------------------------------------
+int main() {
+    const int N = 1 << 20;
+    const size_t bytes = N * sizeof(float);
+
+    sycl::queue q{sycl::default_selector_v};
+    std::printf("Device: %s\n",
+                q.get_device().get_info<sycl::info::device::name>().c_str());
+
+    std::vector<float> h_x(N), h_y(N);
+    for (int i = 0; i < N; ++i) h_x[i] = (i % 200 - 100) * 0.01f;
+
+    float* d_x = sycl::malloc_device<float>(N, q);
+    float* d_y = sycl::malloc_device<float>(N, q);
+    q.memcpy(d_x, h_x.data(), bytes).wait();
+
+    int num_wg = (N + kBlockWork - 1) / kBlockWork;
+    sycl::nd_range<1> ndr{sycl::range<1>(num_wg * kWgSize),
+                          sycl::range<1>(kWgSize)};
+
+    // ---- Kernel launch (parallel_for with the named functor) ---------------
+    q.submit([&](sycl::handler& h) {
+        h.parallel_for(ndr, SiluVectorizedKernel<kVecSize>{d_x, d_y, N});
+    }).wait();
+
+    q.memcpy(h_y.data(), d_y, bytes).wait();
+
+    float ref = h_x[12345] / (1.0f + std::exp(-h_x[12345]));
+    std::printf("SYCL vec  SiLU[12345] = %.6f   (ref %.6f)\n",
+                h_y[12345], ref);
+
+    sycl::free(d_x, q);
+    sycl::free(d_y, q);
+    return 0;
+}

@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+*.o
+*.obj
+
+# Compiled binaries
+silu_cuda
+silu_sycl
+silu_vec_cuda
+silu_vec_sycl
+silu_bench
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
