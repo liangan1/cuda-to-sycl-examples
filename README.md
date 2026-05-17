@@ -28,11 +28,40 @@ Kernel body is byte-for-byte identical; only the launch glue differs.
 | Launch                   | `silu_kernel<<<grid, block>>>(d_x,d_y,N)`   | `h.set_args(...); h.parallel_for(nd_range, kernel);`                                         |
 | Sync / alloc / free      | `cudaDeviceSynchronize/Malloc/Free`         | `q.wait()` / `sycl::malloc_device` / `sycl::free`                                            |
 
+**CUDA** ([silu/silu.cu](silu/silu.cu)):
 ```cpp
-// CUDA                                          // SYCL
-float v = x[i];                                  float v = x[i];
-y[i] = v / (1.0f + expf(-v));                    y[i] = v / (1.0f + sycl::exp(-v));
+__global__ void silu_kernel(const float* __restrict__ x,
+                            float*       __restrict__ y, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float v = x[i];
+        y[i] = v / (1.0f + expf(-v));
+    }
+}
+// launch
+silu_kernel<<<grid, BLOCK>>>(d_x, d_y, N);
+cudaDeviceSynchronize();
 ```
+
+**SYCL** ([silu/silu.sycl.cpp](silu/silu.sycl.cpp)):
+```cpp
+SYCL_EXTERNAL
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+void silu_kernel(const float* x, float* y, int n) {
+    auto it = syclex::this_work_item::get_nd_item<1>();
+    int i = it.get_global_id(0);
+    if (i < n) {
+        float v = x[i];
+        y[i] = v / (1.0f + sycl::exp(-v));
+    }
+}
+// launch
+auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(q.get_context());
+sycl::kernel k = syclex::get_kernel<silu_kernel>(bundle);
+q.submit([&](sycl::handler& h){ h.set_args(d_x, d_y, N); h.parallel_for(ndr, k); }).wait();
+```
+
+The three lines inside the `if` are the same.
 
 ---
 
@@ -55,6 +84,42 @@ plug into the same `silu_stub`; the math is identical.
 | `opmath_t` promotion          | `at::opmath_type<scalar_t>`                    | same                                                    |
 | `exp`                         | `::exp` / `c10::cuda::compat::exp`             | `std::exp` (resolves to `sycl::exp`)                    |
 | Stub registration             | `REGISTER_DISPATCH(silu_stub, &silu_kernel)`   | `REGISTER_XPU_DISPATCH(silu_stub, &xpu::silu_kernel)`   |
+
+**CUDA upstream** ([silu/upstream/silu_upstream_cuda.cu](silu/upstream/silu_upstream_cuda.cu)):
+```cpp
+void silu_kernel(TensorIteratorBase& iter) {
+  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16,
+      iter.dtype(), "silu_cuda", [&]() {
+        gpu_kernel(iter, [] GPU_LAMBDA(scalar_t x) -> scalar_t {
+          using opmath_t = at::opmath_type<scalar_t>;
+          const opmath_t x_acc = static_cast<opmath_t>(x);
+          return x_acc / (opmath_t(1) + ::exp(-x_acc));
+        });
+      });
+}
+REGISTER_DISPATCH(silu_stub, &silu_kernel)
+```
+
+**SYCL/XPU upstream** ([silu/upstream/silu_upstream_sycl.cpp](silu/upstream/silu_upstream_sycl.cpp)):
+```cpp
+template <typename scalar_t>
+struct SiluFunctor {
+  scalar_t operator()(scalar_t x) const {
+    using opmath_t = at::opmath_type<scalar_t>;
+    const opmath_t x_acc = static_cast<opmath_t>(x);
+    return x_acc / (opmath_t(1) + std::exp(-x_acc));        // <-- same line
+  }
+};
+void silu_kernel(TensorIteratorBase& iter) {
+  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16,
+      iter.dtype(), "silu_xpu", [&]() {
+        gpu_kernel(iter, SiluFunctor<scalar_t>());
+      });
+}
+REGISTER_XPU_DISPATCH(silu_stub, &xpu::silu_kernel);
+```
 
 The only structural diff: CUDA's `GPU_LAMBDA` becomes a named `struct` in SYCL
 (SYCL kernels need named types for kernel-bundle lookup). The body —
@@ -85,6 +150,64 @@ two-branch shape; ports to SYCL line-for-line.
 | 128-bit aligned store  | `*reinterpret_cast<float4*>(p) = out`             | `v.store(0, multi_ptr<…global_space>(p))`                                     |
 | Launch                 | `kernel<<<grid, BLOCK>>>(args)`                   | `q.parallel_for(nd_range<1>{grid*BLOCK, BLOCK}, K{args…})`                    |
 | Math intrinsic         | `__expf(-v)`                                      | `sycl::exp(-v)`                                                               |
+
+**CUDA** ([silu/vectorized/silu_vectorized.cu](silu/vectorized/silu_vectorized.cu)):
+```cpp
+template <int VEC>
+__global__ void silu_vectorized_kernel(const float* __restrict__ x,
+                                       float*       __restrict__ y, int N) {
+    int tile_base = blockIdx.x * kBlockWork;
+    int remaining = N - tile_base;
+    if (remaining >= kBlockWork) {
+        int base = tile_base + threadIdx.x * VEC;
+        const float4* xv = reinterpret_cast<const float4*>(x + base);
+        float4* yv       = reinterpret_cast<float4*>(y + base);
+        float4 in = *xv;  float4 out;
+        out.x = silu_op(in.x);  out.y = silu_op(in.y);
+        out.z = silu_op(in.z);  out.w = silu_op(in.w);
+        *yv = out;
+    } else {
+        #pragma unroll
+        for (int j = 0; j < VEC; ++j) {
+            int i = tile_base + threadIdx.x + j * blockDim.x;
+            if (i < N) y[i] = silu_op(x[i]);
+        }
+    }
+}
+```
+
+**SYCL** ([silu/vectorized/silu_vectorized.sycl.cpp](silu/vectorized/silu_vectorized.sycl.cpp)):
+```cpp
+template <int VEC>
+struct SiluVectorizedKernel {
+    const float* x;  float* y;  int N;
+    void operator()(sycl::nd_item<1> item) const {
+        int grpid = item.get_group(0);
+        int lid   = item.get_local_id(0);
+        int wgsz  = item.get_local_range(0);
+        int tile_base = grpid * kBlockWork;
+        int remaining = N - tile_base;
+        if (remaining >= kBlockWork) {
+            int base = tile_base + lid * VEC;
+            using vec_t = sycl::vec<float, VEC>;
+            vec_t in;
+            in.load(0, sycl::multi_ptr<const float,
+                        sycl::access::address_space::global_space>(x + base));
+            vec_t out;
+            #pragma unroll
+            for (int j = 0; j < VEC; ++j) out[j] = silu_op(in[j]);
+            out.store(0, sycl::multi_ptr<float,
+                         sycl::access::address_space::global_space>(y + base));
+        } else {
+            #pragma unroll
+            for (int j = 0; j < VEC; ++j) {
+                int i = tile_base + lid + j * wgsz;
+                if (i < N) y[i] = silu_op(x[i]);
+            }
+        }
+    }
+};
+```
 
 Same `if (remaining >= kBlockWork)` fast-path branch + scalar-tail `for` loop
 with bounds check. Same algorithm, just spelled in SYCL types.
