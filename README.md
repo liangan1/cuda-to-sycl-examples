@@ -3,7 +3,7 @@
 Side-by-side **CUDA ↔ SYCL** kernel examples for engineers porting NVIDIA code
 to Intel XPU. The thesis: porting is structurally mechanical — the programming
 model, math, indexing, and memory model all map one-to-one; only µarch tuning
-constants change. **All contents in this repo is gernated by AI**. 
+constants change. **All contents in this repo are gernated by AI**. 
 
 Worked example: **SiLU** (Swish), `y = x * sigmoid(x) = x / (1 + exp(-x))`,
 walked in **three steps** of increasing realism.
