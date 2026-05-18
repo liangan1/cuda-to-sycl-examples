@@ -25,8 +25,17 @@ Kernel body is byte-for-byte identical; only the launch glue differs.
 | Kernel marker            | `__global__ void silu_kernel(...)`          | `SYCL_EXTERNAL SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((nd_range_kernel<1>)) void silu_kernel(...)`|
 | Global thread index      | `blockIdx.x * blockDim.x + threadIdx.x`     | `this_work_item::get_nd_item<1>().get_global_id(0)`                                          |
 | Math intrinsic           | `expf(-v)`                                  | `sycl::exp(-v)`                                                                              |
-| Launch                   | `silu_kernel<<<grid, block>>>(d_x,d_y,N)`   | `syclexp::nd_launch(q, ndr, kernel_function<silu_kernel>, d_x, d_y, N)`                      |
+| Launch (sugar)           | `silu_kernel<<<grid, block>>>(d_x,d_y,N)`   | *(no triple-chevron equivalent)*                                                             |
+| Launch (explicit C API)  | `cudaLaunchKernel((const void*)silu_kernel, dim3(grid), dim3(block), args, 0, 0)` | `syclexp::nd_launch(q, ndr, kernel_function<silu_kernel>, d_x, d_y, N)`            |
 | Sync / alloc / free      | `cudaDeviceSynchronize/Malloc/Free`         | `q.wait()` / `sycl::malloc_device` / `sycl::free`                                            |
+
+> **Launch APIs — the symmetry.** CUDA offers *two* ways to launch: the
+> language-extension sugar `kernel<<<grid, block>>>(args)` and the explicit
+> runtime C API [`cudaLaunchKernel`](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXECUTION.html#group__CUDART__EXECUTION_1g5064cdf5d8e6741ace56fd8be951783c)
+> (which is what `<<<>>>` actually lowers to in the nvcc-generated code).
+> SYCL has *no* triple-chevron sugar; `syclexp::nd_launch` *is* the explicit
+> API, and it's the structural mirror of `cudaLaunchKernel` — a plain C++
+> function call taking the kernel address + arg pack + nd-range.
 
 **CUDA** ([silu/silu.cu](silu/silu.cu)):
 ```cpp
@@ -40,6 +49,13 @@ __global__ void silu_kernel(const float* __restrict__ x,
 }
 // launch
 silu_kernel<<<grid, BLOCK>>>(d_x, d_y, N);
+cudaDeviceSynchronize();
+
+// Equivalent explicit runtime API call (what <<<>>> lowers to):
+void* args[] = { (void*)&d_x, (void*)&d_y, (void*)&N };
+cudaLaunchKernel((const void*)silu_kernel,
+                 dim3(grid), dim3(BLOCK),
+                 args, /*sharedMem=*/0, /*stream=*/0);
 cudaDeviceSynchronize();
 ```
 
@@ -148,7 +164,7 @@ two-branch shape; ports to SYCL line-for-line.
 | Block / thread index   | `blockIdx.x` / `threadIdx.x` / `blockDim.x`       | `auto it = syclwi::get_nd_item<1>(); it.get_group(0) / get_local_id(0) / get_local_range(0)` |
 | 128-bit aligned load   | `float4 in = *reinterpret_cast<const float4*>(p)` | `sycl::vec<float,4> v; v.load(0, multi_ptr<…global_space>(p))`                |
 | 128-bit aligned store  | `*reinterpret_cast<float4*>(p) = out`             | `v.store(0, multi_ptr<…global_space>(p))`                                     |
-| Launch                 | `kernel<<<grid, BLOCK>>>(args)`                   | `syclexp::nd_launch(q, ndr, kernel_function<kernel>, args...)`                |
+| Launch                 | `kernel<<<grid, BLOCK>>>(args)` &nbsp;or&nbsp; `cudaLaunchKernel(funcAddr, dim3(grid), dim3(BLOCK), args, 0, 0)` | `syclexp::nd_launch(q, ndr, kernel_function<kernel>, args...)` |
 | Math intrinsic         | `__expf(-v)`                                      | `sycl::exp(-v)`                                                               |
 
 **CUDA** ([silu/vectorized/silu_vectorized.cu](silu/vectorized/silu_vectorized.cu)):

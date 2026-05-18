@@ -100,7 +100,12 @@ int main() {
 
     // ---- Kernel launch -----------------------------------------------------
     // Free-function nd_launch: directly enqueue the kernel function with
-    // its arguments — the closest SYCL equivalent of CUDA's <<<>>>.
+    // its arguments — the structural counterpart of CUDA's explicit runtime
+    // launch API `cudaLaunchKernel(funcAddr, gridDim, blockDim, args, smem,
+    // stream)`. (CUDA also offers the `<<<grid, block>>>` sugar that lowers
+    // to cudaLaunchKernel; SYCL has no such sugar — nd_launch *is* the API.)
+    // CUDA reference:
+    //   https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXECUTION.html#group__CUDART__EXECUTION_1g5064cdf5d8e6741ace56fd8be951783c
     syclexp::nd_launch(q, ndr,
                        syclexp::kernel_function<silu_vectorized_kernel>,
                        d_x, d_y, N);

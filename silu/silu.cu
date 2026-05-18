@@ -37,6 +37,17 @@ int main() {
     int grid = (N + BLOCK - 1) / BLOCK;
 
     // ---- Kernel launch (triple-chevron syntax) -----------------------------
+    // This is sugar; the CUDA runtime also exposes the explicit C API
+    // cudaLaunchKernel, which is what `<<<>>>` lowers to. It is the direct
+    // structural counterpart of SYCL's `nd_launch` (a plain C++ function call
+    // taking the kernel address + args). Equivalent code:
+    //
+    //   void* args[] = { (void*)&d_x, (void*)&d_y, (void*)&N };
+    //   cudaLaunchKernel((const void*)silu_kernel,
+    //                    dim3(grid), dim3(BLOCK),
+    //                    args, /*sharedMem=*/0, /*stream=*/0);
+    //
+    // See: https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXECUTION.html#group__CUDART__EXECUTION_1g5064cdf5d8e6741ace56fd8be951783c
     silu_kernel<<<grid, BLOCK>>>(d_x, d_y, N);
     cudaDeviceSynchronize();
 

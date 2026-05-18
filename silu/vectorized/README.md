@@ -101,6 +101,19 @@ syclexp::nd_launch(q, ndr,
 q.wait();
 ```
 
+For reference, the explicit-API form on the CUDA side
+(what `kernel<<<...>>>(args)` lowers to) is the direct counterpart:
+```cpp
+void* args[] = { (void*)&d_x, (void*)&d_y, (void*)&N };
+cudaLaunchKernel((const void*)&silu_vectorized_kernel<kVecSize>,
+                 dim3(grid), dim3(kBlockSize),
+                 args, /*sharedMem=*/0, /*stream=*/0);
+cudaDeviceSynchronize();
+```
+See the [CUDA Runtime API reference](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXECUTION.html#group__CUDART__EXECUTION_1g5064cdf5d8e6741ace56fd8be951783c).
+Same three pieces of information — kernel address, launch geometry, packed
+args — just in different syntactic clothing.
+
 The two branches are line-for-line the same shape; only the **vector type
 spelling** and the **launch wrapper** change. The SYCL kernel is a plain
 top-level free function (sycl_ext_oneapi_free_function_kernels), the direct
@@ -117,7 +130,7 @@ structural counterpart of CUDA's `__global__` — same approach as step 1.
 | 128-bit aligned store           | `*reinterpret_cast<float4*>(p) = out`             | `v.store(0, multi_ptr<…global_space>(p))`                                     |
 | Element access in vec           | `in.x / in.y / in.z / in.w`                       | `in[0] / in[1] / in[2] / in[3]`                                               |
 | Math intrinsic                  | `__expf(-v)`                                      | `sycl::exp(-v)`                                                               |
-| Launch                          | `kernel<<<grid, BLOCK>>>(args)`                   | `syclexp::nd_launch(q, ndr, syclexp::kernel_function<kernel>, args...)` |
+| Launch                          | `kernel<<<grid, BLOCK>>>(args)` &nbsp;or&nbsp; `cudaLaunchKernel(funcAddr, dim3(grid), dim3(BLOCK), args, 0, 0)` | `syclexp::nd_launch(q, ndr, syclexp::kernel_function<kernel>, args...)` |
 | Sync                            | `cudaDeviceSynchronize()`                         | `q.wait()`                                                                    |
 | Stream / queue                  | implicit / `cudaStream_t`                         | `sycl::queue`                                                                 |
 

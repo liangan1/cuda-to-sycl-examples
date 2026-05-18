@@ -76,6 +76,17 @@ int main() {
     cudaMemcpy(d_x, h_x.data(), bytes, cudaMemcpyHostToDevice);
 
     int grid = (N + kBlockWork - 1) / kBlockWork;
+    // Triple-chevron launch. CUDA also exposes the explicit C API
+    // cudaLaunchKernel — the direct structural counterpart of SYCL's
+    // `nd_launch`. Equivalent code (the address of an instantiated template
+    // is taken explicitly):
+    //
+    //   void* args[] = { (void*)&d_x, (void*)&d_y, (void*)&N };
+    //   cudaLaunchKernel((const void*)&silu_vectorized_kernel<kVecSize>,
+    //                    dim3(grid), dim3(kBlockSize),
+    //                    args, /*sharedMem=*/0, /*stream=*/0);
+    //
+    // See: https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXECUTION.html#group__CUDART__EXECUTION_1g5064cdf5d8e6741ace56fd8be951783c
     silu_vectorized_kernel<kVecSize><<<grid, kBlockSize>>>(d_x, d_y, N);
     cudaDeviceSynchronize();
 
