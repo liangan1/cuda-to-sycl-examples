@@ -93,11 +93,12 @@ void silu_vectorized_kernel(const float* x, float* y, int N) {
 }
 ```
 
-Launch glue (same pattern as step 1):
+Launch glue (same `nd_launch` pattern as step 1):
 ```cpp
-auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(q.get_context());
-sycl::kernel k = bundle.ext_oneapi_get_kernel<silu_vectorized_kernel>();
-q.submit([&](sycl::handler& h){ h.set_args(d_x, d_y, N); h.parallel_for(ndr, k); }).wait();
+syclexp::nd_launch(q, ndr,
+                   syclexp::kernel_function<silu_vectorized_kernel>,
+                   d_x, d_y, N);
+q.wait();
 ```
 
 The two branches are line-for-line the same shape; only the **vector type
@@ -116,7 +117,7 @@ structural counterpart of CUDA's `__global__` — same approach as step 1.
 | 128-bit aligned store           | `*reinterpret_cast<float4*>(p) = out`             | `v.store(0, multi_ptr<…global_space>(p))`                                     |
 | Element access in vec           | `in.x / in.y / in.z / in.w`                       | `in[0] / in[1] / in[2] / in[3]`                                               |
 | Math intrinsic                  | `__expf(-v)`                                      | `sycl::exp(-v)`                                                               |
-| Launch                          | `kernel<<<grid, BLOCK>>>(args)`                   | `auto k = bundle.ext_oneapi_get_kernel<kernel>(); h.set_args(args); h.parallel_for(ndr, k);` |
+| Launch                          | `kernel<<<grid, BLOCK>>>(args)`                   | `syclexp::nd_launch(q, ndr, syclexp::kernel_function<kernel>, args...)` |
 | Sync                            | `cudaDeviceSynchronize()`                         | `q.wait()`                                                                    |
 | Stream / queue                  | implicit / `cudaStream_t`                         | `sycl::queue`                                                                 |
 

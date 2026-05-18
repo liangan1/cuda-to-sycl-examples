@@ -70,7 +70,7 @@ The three lines inside the `if` are byte-for-byte the same.
 | Device alloc         | `cudaMalloc(&p, bytes)`               | `sycl::malloc_device<T>(N, q)`                           |
 | H2D / D2H copy       | `cudaMemcpy(...)`                     | `q.memcpy(...).wait()`                                   |
 | Launch config        | `<<<grid, block>>>`                   | `sycl::nd_range<1>{grid*block, block}`                   |
-| Launch               | `silu_kernel<<<g,b>>>(d_x,d_y,N);`    | `h.set_args(d_x,d_y,N); h.parallel_for(ndr, kernel);`    |
+| Launch syntax            | `silu_kernel<<<grid, BLOCK>>>(d_x, d_y, N);`     | `syclexp::nd_launch(q, ndr, syclexp::kernel_function<silu_kernel>, d_x, d_y, N);` |
 | Sync                 | `cudaDeviceSynchronize()`             | `q.wait()`                                               |
 | Free                 | `cudaFree(p)`                         | `sycl::free(p, q)`                                       |
 

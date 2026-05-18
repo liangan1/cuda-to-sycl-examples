@@ -17,13 +17,14 @@
 
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/experimental/free_function_traits.hpp>
+#include <sycl/ext/oneapi/experimental/enqueue_functions.hpp>
 #include <sycl/ext/oneapi/free_function_queries.hpp>
 #include <cstdio>
 #include <vector>
 #include <cmath>
 
-namespace syclex = sycl::ext::oneapi::experimental;
-namespace syclwi = sycl::ext::oneapi::this_work_item;
+namespace syclexp = sycl::ext::oneapi::experimental;
+namespace syclwi  = sycl::ext::oneapi::this_work_item;
 
 // ---- Compile-time knobs (the µarch tuning) ---------------------------------
 //   CUDA picks kBlockSize ≈ 128 (warps × occupancy).
@@ -42,7 +43,7 @@ static inline float silu_op(float v) {
 // Same shape as CUDA __global__: top-level function, captures via parameters,
 // gets work-item coordinates from `this_work_item::get_nd_item<1>()`.
 SYCL_EXTERNAL
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<1>))
 void silu_vectorized_kernel(const float* x, float* y, int N) {
     auto item = syclwi::get_nd_item<1>();
     int grpid = item.get_group(0);             // ↔ blockIdx.x
@@ -98,16 +99,12 @@ int main() {
                           sycl::range<1>(kWgSize)};
 
     // ---- Kernel launch -----------------------------------------------------
-    // Resolve the free-function kernel by its address, then enqueue it
-    // — identical pattern to silu.sycl.cpp (step 1).
-    auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(
-        q.get_context());
-    sycl::kernel k = bundle.ext_oneapi_get_kernel<silu_vectorized_kernel>();
-
-    q.submit([&](sycl::handler& h) {
-        h.set_args(d_x, d_y, N);
-        h.parallel_for(ndr, k);
-    }).wait();
+    // Free-function nd_launch: directly enqueue the kernel function with
+    // its arguments — the closest SYCL equivalent of CUDA's <<<>>>.
+    syclexp::nd_launch(q, ndr,
+                       syclexp::kernel_function<silu_vectorized_kernel>,
+                       d_x, d_y, N);
+    q.wait();
 
     q.memcpy(h_y.data(), d_y, bytes).wait();
 

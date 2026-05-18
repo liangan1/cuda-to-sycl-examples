@@ -25,7 +25,7 @@ Kernel body is byte-for-byte identical; only the launch glue differs.
 | Kernel marker            | `__global__ void silu_kernel(...)`          | `SYCL_EXTERNAL SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((nd_range_kernel<1>)) void silu_kernel(...)`|
 | Global thread index      | `blockIdx.x * blockDim.x + threadIdx.x`     | `this_work_item::get_nd_item<1>().get_global_id(0)`                                          |
 | Math intrinsic           | `expf(-v)`                                  | `sycl::exp(-v)`                                                                              |
-| Launch                   | `silu_kernel<<<grid, block>>>(d_x,d_y,N)`   | `h.set_args(...); h.parallel_for(nd_range, kernel);`                                         |
+| Launch                   | `silu_kernel<<<grid, block>>>(d_x,d_y,N)`   | `syclexp::nd_launch(q, ndr, kernel_function<silu_kernel>, d_x, d_y, N)`                      |
 | Sync / alloc / free      | `cudaDeviceSynchronize/Malloc/Free`         | `q.wait()` / `sycl::malloc_device` / `sycl::free`                                            |
 
 **CUDA** ([silu/silu.cu](silu/silu.cu)):
@@ -55,10 +55,10 @@ void silu_kernel(const float* x, float* y, int n) {
         y[i] = v / (1.0f + sycl::exp(-v));
     }
 }
-// launch
-auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(q.get_context());
-sycl::kernel k = syclex::get_kernel<silu_kernel>(bundle);
-q.submit([&](sycl::handler& h){ h.set_args(d_x, d_y, N); h.parallel_for(ndr, k); }).wait();
+// launch (nd_launch from sycl_ext_oneapi_free_function_kernels —
+// the closest SYCL equivalent of CUDA <<<grid, block>>>)
+syclexp::nd_launch(q, ndr, syclexp::kernel_function<silu_kernel>, d_x, d_y, N);
+q.wait();
 ```
 
 The three lines inside the `if` are the same.
@@ -148,7 +148,7 @@ two-branch shape; ports to SYCL line-for-line.
 | Block / thread index   | `blockIdx.x` / `threadIdx.x` / `blockDim.x`       | `auto it = syclwi::get_nd_item<1>(); it.get_group(0) / get_local_id(0) / get_local_range(0)` |
 | 128-bit aligned load   | `float4 in = *reinterpret_cast<const float4*>(p)` | `sycl::vec<float,4> v; v.load(0, multi_ptr<…global_space>(p))`                |
 | 128-bit aligned store  | `*reinterpret_cast<float4*>(p) = out`             | `v.store(0, multi_ptr<…global_space>(p))`                                     |
-| Launch                 | `kernel<<<grid, BLOCK>>>(args)`                   | `auto k = bundle.ext_oneapi_get_kernel<kernel>(); h.set_args(args); h.parallel_for(ndr, k);` |
+| Launch                 | `kernel<<<grid, BLOCK>>>(args)`                   | `syclexp::nd_launch(q, ndr, kernel_function<kernel>, args...)`                |
 | Math intrinsic         | `__expf(-v)`                                      | `sycl::exp(-v)`                                                               |
 
 **CUDA** ([silu/vectorized/silu_vectorized.cu](silu/vectorized/silu_vectorized.cu)):

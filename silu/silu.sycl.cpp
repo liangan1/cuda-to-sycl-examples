@@ -6,7 +6,7 @@
 // Concept mapping vs CUDA:
 //   __global__              ->  SYCL_EXT_ONEAPI_FUNCTION_PROPERTY(nd_range_kernel<1>)
 //   blockIdx/threadIdx      ->  this_work_item::get_nd_item<1>().get_global_id(0)
-//   <<<grid, block>>>       ->  q.parallel_for(nd_range, kernel_id)  (or launch helper)
+//   <<<grid, block>>>       ->  syclexp::nd_launch(q, ndr, kernel_function<silu_kernel>, args...)
 //   cudaMalloc/cudaMemcpy   ->  sycl::malloc_device / q.memcpy
 //   cudaDeviceSynchronize   ->  q.wait()
 
@@ -18,12 +18,12 @@
 #include <vector>
 #include <cmath>
 
-namespace syclex   = sycl::ext::oneapi::experimental;
-namespace syclwi   = sycl::ext::oneapi::this_work_item;
+namespace syclexp = sycl::ext::oneapi::experimental;
+namespace syclwi  = sycl::ext::oneapi::this_work_item;
 
 // ---- Device kernel: free function (same shape as CUDA __global__) ----------
 SYCL_EXTERNAL
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<1>))
 void silu_kernel(const float* x, float* y, int n) {
     auto it = syclwi::get_nd_item<1>();
     int i = it.get_global_id(0);
@@ -54,15 +54,12 @@ int main() {
     sycl::nd_range<1> ndr{sycl::range<1>(grid * BLOCK), sycl::range<1>(BLOCK)};
 
     // ---- Kernel launch -----------------------------------------------------
-    // Resolve the free-function kernel by its address, then enqueue it.
-    auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(
-        q.get_context());
-    sycl::kernel k = bundle.ext_oneapi_get_kernel<silu_kernel>();
-
-    q.submit([&](sycl::handler& h) {
-        h.set_args(d_x, d_y, N);
-        h.parallel_for(ndr, k);
-    }).wait();
+    // Free-function nd_launch: pass the queue, nd_range, the
+    // kernel_function<silu_kernel> tag, and the kernel arguments by value.
+    // This is the closest SYCL equivalent of the CUDA <<<grid, block>>>(args)
+    // syntax: one call, no handler/bundle boilerplate.
+    syclexp::nd_launch(q, ndr, syclexp::kernel_function<silu_kernel>, d_x, d_y, N);
+    q.wait();
 
     q.memcpy(h_y.data(), d_y, bytes).wait();
 

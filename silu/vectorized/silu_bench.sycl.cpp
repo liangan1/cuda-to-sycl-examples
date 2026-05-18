@@ -32,6 +32,7 @@
 
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/experimental/free_function_traits.hpp>
+#include <sycl/ext/oneapi/experimental/enqueue_functions.hpp>
 #include <sycl/ext/oneapi/free_function_queries.hpp>
 #include <algorithm>
 #include <cmath>
@@ -41,8 +42,8 @@
 #include <string>
 #include <vector>
 
-namespace syclex = sycl::ext::oneapi::experimental;
-namespace syclwi = sycl::ext::oneapi::this_work_item;
+namespace syclexp = sycl::ext::oneapi::experimental;
+namespace syclwi  = sycl::ext::oneapi::this_work_item;
 
 // ---------------------------------------------------------------------------
 // Kernels (free-function form — same shape as CUDA __global__)
@@ -56,7 +57,7 @@ static inline float silu_op(float v) {
 
 // Naive: one element per work-item, no vectorization, no tile awareness.
 SYCL_EXTERNAL
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<1>))
 void silu_naive_kernel(const float* x, float* y, int N) {
     auto item = syclwi::get_nd_item<1>();
     int i = item.get_global_id(0);
@@ -70,7 +71,7 @@ constexpr int kWgSizeVec  = 256;
 constexpr int kBlockWork  = kVecSize * kWgSizeVec;
 
 SYCL_EXTERNAL
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<1>))
 void silu_vec_kernel(const float* x, float* y, int N) {
     auto item = syclwi::get_nd_item<1>();
     int grpid = item.get_group(0);
@@ -103,7 +104,7 @@ void silu_vec_kernel(const float* x, float* y, int N) {
 // Trivial init kernel — fill x with (i%200-100)*0.01f. Also a free function
 // for consistency.
 SYCL_EXTERNAL
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclex::nd_range_kernel<1>))
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<1>))
 void init_kernel(float* x, int N) {
     auto item = syclwi::get_nd_item<1>();
     int i = item.get_global_id(0);
@@ -160,9 +161,6 @@ struct RunResult {
 };
 
 static RunResult run_one_size(sycl::queue& q,
-                              sycl::kernel& k_naive,
-                              sycl::kernel& k_vec,
-                              sycl::kernel& k_init,
                               int N, int warmup, int iters) {
     float* d_x = sycl::malloc_device<float>(N, q);
     float* d_y = sycl::malloc_device<float>(N, q);
@@ -173,13 +171,11 @@ static RunResult run_one_size(sycl::queue& q,
         int grid = (N + kWgInit - 1) / kWgInit;
         sycl::nd_range<1> ndr{sycl::range<1>(size_t(grid) * kWgInit),
                               sycl::range<1>(kWgInit)};
-        q.submit([&](sycl::handler& h) {
-            h.set_args(d_x, N);
-            h.parallel_for(ndr, k_init);
-        }).wait();
+        syclexp::nd_launch(q, ndr, syclexp::kernel_function<init_kernel>, d_x, N);
+        q.wait();
     }
 
-    // Naive launch.
+    // Naive launch: wrap nd_launch in q.submit() so we get a profiling event.
     constexpr int kWgSizeNaive = 256;
     int grid_naive = (N + kWgSizeNaive - 1) / kWgSizeNaive;
     sycl::nd_range<1> ndr_naive{
@@ -187,20 +183,22 @@ static RunResult run_one_size(sycl::queue& q,
         sycl::range<1>(kWgSizeNaive)};
     auto submit_naive = [&]() {
         return q.submit([&](sycl::handler& h) {
-            h.set_args(d_x, d_y, N);
-            h.parallel_for(ndr_naive, k_naive);
+            syclexp::nd_launch(h, ndr_naive,
+                               syclexp::kernel_function<silu_naive_kernel>,
+                               d_x, d_y, N);
         });
     };
 
-    // Vectorized launch.
+    // Vectorized launch (same pattern).
     int num_wg = (N + kBlockWork - 1) / kBlockWork;
     sycl::nd_range<1> ndr_vec{
         sycl::range<1>(size_t(num_wg) * kWgSizeVec),
         sycl::range<1>(kWgSizeVec)};
     auto submit_vec = [&]() {
         return q.submit([&](sycl::handler& h) {
-            h.set_args(d_x, d_y, N);
-            h.parallel_for(ndr_vec, k_vec);
+            syclexp::nd_launch(h, ndr_vec,
+                               syclexp::kernel_function<silu_vec_kernel>,
+                               d_x, d_y, N);
         });
     };
 
@@ -263,12 +261,6 @@ int main(int argc, char** argv) {
     if (peak_gbps > 0) std::printf("Peak HBM (user)     : %.1f GB/s\n", peak_gbps);
     std::printf("\n");
 
-    // Resolve free-function kernels once (kernel bundle is process-wide).
-    auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(q.get_context());
-    sycl::kernel k_naive = bundle.ext_oneapi_get_kernel<silu_naive_kernel>();
-    sycl::kernel k_vec   = bundle.ext_oneapi_get_kernel<silu_vec_kernel>();
-    sycl::kernel k_init  = bundle.ext_oneapi_get_kernel<init_kernel>();
-
     // Header
     if (peak_gbps > 0) {
         std::printf("%12s | %30s | %30s | %8s\n",
@@ -287,7 +279,7 @@ int main(int argc, char** argv) {
     }
 
     for (int N : sizes) {
-        auto r = run_one_size(q, k_naive, k_vec, k_init, N, warmup, iters);
+        auto r = run_one_size(q, N, warmup, iters);
         double naive_gbps = gbps(N, r.naive.min_ms);
         double vec_gbps   = gbps(N, r.vec.min_ms);
         double speedup    = r.naive.min_ms / r.vec.min_ms;
