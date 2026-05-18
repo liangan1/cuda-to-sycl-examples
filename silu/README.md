@@ -70,8 +70,7 @@ The three lines inside the `if` are byte-for-byte the same.
 | Device alloc         | `cudaMalloc(&p, bytes)`               | `sycl::malloc_device<T>(N, q)`                           |
 | H2D / D2H copy       | `cudaMemcpy(...)`                     | `q.memcpy(...).wait()`                                   |
 | Launch config        | `<<<grid, block>>>`                   | `sycl::nd_range<1>{grid*block, block}`                   |
-| Launch (sugar)       | `silu_kernel<<<grid, BLOCK>>>(d_x, d_y, N);`     | *(no triple-chevron equivalent)*                          |
-| Launch (explicit C API) | `cudaLaunchKernel((const void*)silu_kernel, dim3(grid), dim3(BLOCK), args, 0, 0)` | `syclexp::nd_launch(q, ndr, syclexp::kernel_function<silu_kernel>, d_x, d_y, N)` |
+| Launch                | `silu_kernel<<<grid, BLOCK>>>(d_x, d_y, N);` &nbsp;or&nbsp; `cudaLaunchKernel((const void*)silu_kernel, dim3(grid), dim3(BLOCK), args, 0, 0)` | `syclexp::nd_launch(q, ndr, syclexp::kernel_function<silu_kernel>, d_x, d_y, N)` |
 | Sync                 | `cudaDeviceSynchronize()`             | `q.wait()`                                               |
 | Free                 | `cudaFree(p)`                         | `sycl::free(p, q)`                                       |
 
@@ -99,14 +98,14 @@ SiLU[12345] = 0.xxxxxx   (ref 0.xxxxxx)
 - The kernel itself is a plain free function.
 
 **Different** (and intentional):
-- CUDA has *two* launch APIs: the language-extension sugar
-  `kernel<<<grid, block>>>(args)` and the explicit C runtime API
-  [`cudaLaunchKernel(funcAddr, gridDim, blockDim, args, smem, stream)`](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXECUTION.html#group__CUDART__EXECUTION_1g5064cdf5d8e6741ace56fd8be951783c)
-  (which is what `<<<>>>` actually lowers to in the nvcc-emitted code).
-  SYCL has no triple-chevron sugar — `syclexp::nd_launch` *is* the API, and
-  it's the structural mirror of `cudaLaunchKernel`: a plain C++ function call
-  taking the kernel address + arg pack + nd-range. This keeps SYCL a pure C++
-  library.
+- CUDA exposes *two* spellings for kernel launch: the language-extension
+  sugar `kernel<<<grid, block>>>(args)` and the explicit C runtime API
+  [`cudaLaunchKernel(funcAddr, gridDim, blockDim, args, smem, stream)`](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXECUTION.html#group__CUDART__EXECUTION_1g5064cdf5d8e6741ace56fd8be951783c) —
+  the former is sugar that nvcc lowers to the latter. SYCL's
+  `syclexp::nd_launch` is the semantically equivalent API on the SYCL side:
+  a plain C++ function call taking `(queue, nd_range, kernel address, arg
+  pack)`. The three forms differ only in syntactic surface; SYCL stays a
+  pure C++ library by virtue of *not* needing a language extension.
 - µarch tuning differs: Intel Xe2 has DPAS systolic arrays, 2D block loads,
   XeSS, and an LSC/L1/L2 hierarchy distinct from NVIDIA SM/SMEM. For SiLU
   (memory-bound, elementwise), the optimal block size and vectorization width

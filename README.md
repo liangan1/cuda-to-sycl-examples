@@ -25,17 +25,16 @@ Kernel body is byte-for-byte identical; only the launch glue differs.
 | Kernel marker            | `__global__ void silu_kernel(...)`          | `SYCL_EXTERNAL SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((nd_range_kernel<1>)) void silu_kernel(...)`|
 | Global thread index      | `blockIdx.x * blockDim.x + threadIdx.x`     | `this_work_item::get_nd_item<1>().get_global_id(0)`                                          |
 | Math intrinsic           | `expf(-v)`                                  | `sycl::exp(-v)`                                                                              |
-| Launch (sugar)           | `silu_kernel<<<grid, block>>>(d_x,d_y,N)`   | *(no triple-chevron equivalent)*                                                             |
-| Launch (explicit C API)  | `cudaLaunchKernel((const void*)silu_kernel, dim3(grid), dim3(block), args, 0, 0)` | `syclexp::nd_launch(q, ndr, kernel_function<silu_kernel>, d_x, d_y, N)`            |
+| Launch                   | `silu_kernel<<<grid, block>>>(d_x,d_y,N)` &nbsp;or&nbsp; `cudaLaunchKernel((const void*)silu_kernel, dim3(grid), dim3(block), args, 0, 0)` | `syclexp::nd_launch(q, ndr, kernel_function<silu_kernel>, d_x, d_y, N)` |
 | Sync / alloc / free      | `cudaDeviceSynchronize/Malloc/Free`         | `q.wait()` / `sycl::malloc_device` / `sycl::free`                                            |
 
-> **Launch APIs — the symmetry.** CUDA offers *two* ways to launch: the
+> **Launch APIs — the symmetry.** CUDA offers *two* spellings: the
 > language-extension sugar `kernel<<<grid, block>>>(args)` and the explicit
 > runtime C API [`cudaLaunchKernel`](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXECUTION.html#group__CUDART__EXECUTION_1g5064cdf5d8e6741ace56fd8be951783c)
-> (which is what `<<<>>>` actually lowers to in the nvcc-generated code).
-> SYCL has *no* triple-chevron sugar; `syclexp::nd_launch` *is* the explicit
-> API, and it's the structural mirror of `cudaLaunchKernel` — a plain C++
-> function call taking the kernel address + arg pack + nd-range.
+> — the former is sugar that nvcc lowers to the latter, so they are
+> semantically identical. SYCL's `syclexp::nd_launch` is a semantically
+> equivalent API: a plain C++ function call taking `(queue, nd_range, kernel
+> address, arg pack)`. The three forms differ only in syntactic surface.
 
 **CUDA** ([silu/silu.cu](silu/silu.cu)):
 ```cpp
