@@ -115,7 +115,7 @@ BenchResult benchmark_kernel(sycl::queue& q, int num_tokens, int d,
   q.memcpy(d_input, h_input, input_bytes).wait();
   delete[] h_input;
   
-  constexpr int BLOCK_SIZE = 256;
+  constexpr int BLOCK_SIZE = 512;  // Matches PyTorch custom op config
   sycl::nd_range<1> ndr{num_tokens * BLOCK_SIZE, BLOCK_SIZE};
   
   // Warmup

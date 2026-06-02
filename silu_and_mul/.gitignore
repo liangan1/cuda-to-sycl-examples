@@ -1,0 +1,25 @@
+# Python build artifacts
+torch_ext/build/
+torch_ext/dist/
+torch_ext/*.egg-info/
+torch_ext/*.so
+__pycache__/
+*.pyc
+
+# C++ build artifacts
+build/
+*.o
+*.so
+silu_and_mul_bench
+silu_and_mul_standalone
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
