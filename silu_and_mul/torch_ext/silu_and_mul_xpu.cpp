@@ -98,9 +98,10 @@ torch::Tensor silu_and_mul_xpu(torch::Tensor input) {
                                .dtype(torch::kFloat32)
                                .device(input.device()));
   
-  // Get PyTorch XPU queue
-  sycl::queue q = c10::xpu::get_queue_from_stream(
-      c10::xpu::getCurrentXPUStream(input.device().index()));
+  // Get PyTorch XPU queue from current stream
+  // This ensures proper integration with PyTorch's async execution
+  c10::xpu::XPUStream xpu_stream = c10::xpu::getCurrentXPUStream(input.device().index());
+  sycl::queue& q = xpu_stream.queue();
   
   // Launch kernel
   constexpr int BLOCK_SIZE = 256;
@@ -111,6 +112,7 @@ torch::Tensor silu_and_mul_xpu(torch::Tensor input) {
                      input.data_ptr<float>(),
                      d);
   
+  // No need to wait() - PyTorch manages stream synchronization
   return output;
 }
 
