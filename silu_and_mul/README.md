@@ -135,7 +135,199 @@ __global__ void silu_and_mul_kernel(
 
 This section documents the **direct translation** from NVIDIA CUDA to Intel SYCL, without AMD-specific adaptations.
 
-### B.1 Kernel Semantic Mapping (CUDA → SYCL)
+### B.1 Kernel Code Comparison (Side-by-Side)
+
+<table>
+<tr>
+<td width="50%"><b>🟢 CUDA (vLLM)</b></td>
+<td width="50%"><b>🔵 SYCL (Intel Xe)</b></td>
+</tr>
+
+<tr>
+<td colspan="2"><i><b>1️⃣ Kernel Signature</b></i></td>
+</tr>
+<tr>
+<td>
+
+```cpp
+template <typename scalar_t, int VEC_SIZE>
+__global__ void silu_and_mul_kernel(
+    scalar_t* __restrict__ out,
+    const scalar_t* __restrict__ input,
+    int d)
+{
+```
+
+</td>
+<td>
+
+```cpp
+template <int VEC_SIZE>
+SYCL_EXTERNAL
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((nd_range_kernel<1>))
+void silu_and_mul_kernel_vec(
+    float* __restrict__ out,
+    const float* __restrict__ input,
+    int d)
+{
+```
+
+</td>
+</tr>
+
+<tr>
+<td colspan="2"><i><b>2️⃣ Thread Indexing</b></i></td>
+</tr>
+<tr>
+<td>
+
+```cpp
+// CUDA: implicit thread indices
+const int token_idx = blockIdx.x;
+const int tid = threadIdx.x;
+const int block_size = blockDim.x;
+```
+
+</td>
+<td>
+
+```cpp
+// SYCL: explicit nd_item query
+auto item = syclwi::get_nd_item<1>();
+const int token_idx = item.get_group(0);
+const int tid = item.get_local_id(0);
+const int block_size = item.get_local_range(0);
+```
+
+</td>
+</tr>
+
+<tr>
+<td colspan="2"><i><b>3️⃣ Vectorized Load (128-bit)</b></i></td>
+</tr>
+<tr>
+<td>
+
+```cpp
+// CUDA: float4 with reinterpret_cast
+using vec_t = float4;
+vec_t gate_vec = 
+    *reinterpret_cast<const vec_t*>(gate + base);
+vec_t up_vec = 
+    *reinterpret_cast<const vec_t*>(up + base);
+```
+
+</td>
+<td>
+
+```cpp
+// SYCL: vec<float,4> with .load()
+using vec_t = sycl::vec<float, VEC_SIZE>;
+vec_t gate_vec, up_vec;
+gate_vec.load(0, sycl::multi_ptr<const float,
+    sycl::access::address_space::global_space>(gate + base));
+up_vec.load(0, sycl::multi_ptr<const float,
+    sycl::access::address_space::global_space>(up + base));
+```
+
+</td>
+</tr>
+
+<tr>
+<td colspan="2"><i><b>4️⃣ Element-wise Computation</b></i></td>
+</tr>
+<tr>
+<td>
+
+```cpp
+// CUDA: .x .y .z .w members
+out_vec.x = silu_kernel(gate_vec.x) * up_vec.x;
+out_vec.y = silu_kernel(gate_vec.y) * up_vec.y;
+out_vec.z = silu_kernel(gate_vec.z) * up_vec.z;
+out_vec.w = silu_kernel(gate_vec.w) * up_vec.w;
+```
+
+</td>
+<td>
+
+```cpp
+// SYCL: [0][1][2][3] indexing
+#pragma unroll
+for (int i = 0; i < VEC_SIZE; ++i) {
+  out_vec[i] = silu_op(gate_vec[i]) * up_vec[i];
+}
+```
+
+</td>
+</tr>
+
+<tr>
+<td colspan="2"><i><b>5️⃣ Vectorized Store</b></i></td>
+</tr>
+<tr>
+<td>
+
+```cpp
+// CUDA: reinterpret_cast store
+*reinterpret_cast<vec_t*>(out_ptr + base) = out_vec;
+```
+
+</td>
+<td>
+
+```cpp
+// SYCL: .store() method
+out_vec.store(0, sycl::multi_ptr<float,
+    sycl::access::address_space::global_space>(out_ptr + base));
+```
+
+</td>
+</tr>
+
+<tr>
+<td colspan="2"><i><b>6️⃣ Launch Configuration</b></i></td>
+</tr>
+<tr>
+<td>
+
+```cpp
+// CUDA: <<<grid, block>>> syntax
+dim3 grid(num_tokens);
+dim3 block(256);  // 8 warps (warp size = 32)
+silu_and_mul_kernel<float, 4>
+    <<<grid, block>>>(out, input, d);
+```
+
+</td>
+<td>
+
+```cpp
+// SYCL: nd_range + nd_launch
+int block_size = 512;  // 32 sub-groups (sub-group size = 16)
+sycl::nd_range<1> ndr{num_tokens * block_size, block_size};
+syclexp::nd_launch(q, ndr, 
+    syclexp::kernel_function<silu_and_mul_kernel_vec<4>>,
+    out, input, d);
+```
+
+</td>
+</tr>
+</table>
+
+**Key Differences**:
+
+| Aspect | CUDA | SYCL | Why Different? |
+|--------|------|------|----------------|
+| **Kernel marker** | `__global__` | `SYCL_EXTERNAL + SYCL_EXT_ONEAPI_FUNCTION_PROPERTY` | SYCL free-function extension |
+| **Thread indexing** | Implicit builtins | Explicit `get_nd_item<1>()` | SYCL design choice |
+| **Vector type** | `float4` with `.x .y .z .w` | `sycl::vec<float,4>` with `[0][1][2][3]` | Different APIs |
+| **Vector load/store** | `reinterpret_cast` | `.load()` / `.store()` methods | SYCL type-safe design |
+| **Block size** | 256 (8 warps) | 512 (32 sub-groups) | Hardware: warp 32 vs sub-group 16 |
+| **Launch syntax** | `<<<grid, block>>>` | `nd_range{global, local}` | SYCL nd_range model |
+
+**Semantic Equivalence**: ✅ Despite syntax differences, both implementations execute **identical logic** (1-block-per-token, 128-bit vectorization, scalar tail).
+
+### B.2 API Mapping Reference
 
 #### Thread Hierarchy
 
@@ -165,66 +357,33 @@ This section documents the **direct translation** from NVIDIA CUDA to Intel SYCL
 | **Block setup** | `dim3 block(256)` | Embedded in nd_range (2nd parameter) |
 | **Launch** | `kernel<<<grid, block>>>(...);` | `nd_launch(q, nd_range, kernel_function<K>, ...);` |
 
-**Example side-by-side**:
+**Launch syntax**:
 ```cpp
 // CUDA
 dim3 grid(num_tokens);
 dim3 block(256);
 silu_and_mul_kernel<<<grid, block>>>(out, input, d);
 
-// SYCL
-sycl::nd_range<1> ndr{num_tokens * 256, 256};
-nd_launch(q, ndr, kernel_function<silu_and_mul_kernel_vec<4>>,
-          out, input, d);
+// SYCL (nd_range = {global_size, local_size})
+sycl::nd_range<1> ndr{num_tokens * 512, 512};
+nd_launch(q, ndr, kernel_function<silu_and_mul_kernel_vec<4>>, out, input, d);
 ```
 
-### B.2 Launch Configuration Translation
+### B.3 Configuration Adaptation: Why block_size = 512?
 
-#### CUDA (vLLM) Configuration
+| Aspect | CUDA (NVIDIA) | SYCL (Intel Xe) | Impact |
+|--------|---------------|-----------------|--------|
+| **Warp/Sub-group size** | 32 threads | 16 threads | Hardware fundamental |
+| **Block size** | 256 (8 warps) | 512 (32 sub-groups) | +1.3% performance |
+| **Occupancy** | Good | Better (more sub-groups) | Improved utilization |
+| **Vec size** | 4 (float4) | 4 (vec<float,4>) | ✅ Unchanged |
+| **Grid strategy** | 1 block/token | 1 work-group/token | ✅ Unchanged |
 
-**Source**: [vLLM activation_kernels.cu](https://github.com/vllm-project/vllm/blob/main/csrc/activation_kernels.cu)
-
-```cpp
-// CUDA launch (vLLM implementation)
-constexpr int BLOCK_SIZE = 256;  // Fixed
-dim3 grid(num_tokens);           // 1 block per token
-dim3 block(BLOCK_SIZE);
-
-silu_and_mul_kernel<float, 4><<<grid, block>>>(out, input, d);
-```
-
-**Parameters**:
-- **Grid size**: `num_tokens` (1 block per token)
-- **Block size**: 256 threads (fixed)
-- **Vec size**: 4 floats (float4, 128-bit vectorization)
-- **Hardware**: NVIDIA GPU (warp size = 32)
-
-#### SYCL (Intel Xe) Configuration
-
-**Our implementation**: [torch_ext/silu_and_mul_xpu.cpp](torch_ext/silu_and_mul_xpu.cpp)
-
-```cpp
-// SYCL launch (following CUDA semantics)
-constexpr int VEC_SIZE = 4;      // Same as CUDA
-int block_size = 512;            // Adapted for Intel Xe
-
-sycl::nd_range<1> ndr{num_tokens * block_size, block_size};
-nd_launch(q, ndr, kernel_function<silu_and_mul_kernel_vec<VEC_SIZE>>,
-          out, input, d);
-```
-
-**Parameters**:
-- **Grid size**: `num_tokens` (1 work-group per token) ✅ **Same as CUDA**
-- **Block size**: 512 threads (adapted from 256)
-- **Vec size**: 4 floats (sycl::vec<float,4>) ✅ **Same as CUDA**
-- **Hardware**: Intel Xe GPU (sub-group size = 16)
-
-**Why block_size differs?**
-- NVIDIA warp size: 32 threads
-- Intel Xe sub-group size: 16 threads
-- **256 threads** on NVIDIA = 8 warps = good occupancy
-- **512 threads** on Intel = 32 sub-groups = better occupancy for Intel architecture
-- **Result**: +1.3% performance improvement (66.44 → 67.29 GB/s)
+**Why the difference?**
+- NVIDIA's warp size (32) is 2× Intel's sub-group size (16)
+- To achieve similar occupancy, Intel needs 2× more threads per work-group
+- **256 threads** works for CUDA, but **512 threads** is optimal for Intel Xe
+- **Result**: 66.44 → 67.29 GB/s (+1.3% improvement)
 
 **Configuration comparison**:
 
@@ -235,63 +394,32 @@ nd_launch(q, ndr, kernel_function<silu_and_mul_kernel_vec<VEC_SIZE>>,
 | **Vectorization** | float4 (VEC_SIZE=4) | vec<float,4> | ✅ Identical |
 | **Parallelism** | 1 block per token | 1 work-group per token | ✅ Identical |
 
-### B.3 SYCL Kernel Implementation
+### B.4 Complete SYCL Kernel Implementation
 
-**Complete SYCL kernel** (semantically equivalent to vLLM CUDA):
+**Full source code**: [torch_ext/silu_and_mul_xpu.cpp](torch_ext/silu_and_mul_xpu.cpp)
 
-```cpp
-template <int VEC_SIZE>
-SYCL_EXTERNAL
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<1>))
-void silu_and_mul_kernel_vec(
-    float* __restrict__ out,
-    const float* __restrict__ input,
-    int d)
-{
-  auto item = syclwi::get_nd_item<1>();
-  const int token_idx = item.get_group(0);     // CUDA: blockIdx.x
-  const int tid = item.get_local_id(0);        // CUDA: threadIdx.x
-  const int block_size = item.get_local_range(0); // CUDA: blockDim.x
-  
-  const float* gate = input + token_idx * 2 * d;
-  const float* up   = input + token_idx * 2 * d + d;
-  float* out_ptr    = out + token_idx * d;
-  
-  // Vectorized path (matches CUDA float4 logic)
-  const int num_vec = d / VEC_SIZE;
-  using vec_t = sycl::vec<float, VEC_SIZE>;
-  
-  for (int vec_idx = tid; vec_idx < num_vec; vec_idx += block_size) {
-    int base = vec_idx * VEC_SIZE;
-    vec_t gate_vec, up_vec, out_vec;
-    
-    // Load (CUDA: *reinterpret_cast<float4*>)
-    gate_vec.load(0, sycl::multi_ptr<const float, 
-                      sycl::access::address_space::global_space>(gate + base));
-    up_vec.load(0, sycl::multi_ptr<const float, 
-                    sycl::access::address_space::global_space>(up + base));
-    
-    // Compute (matches CUDA element-wise)
-    #pragma unroll
-    for (int i = 0; i < VEC_SIZE; ++i) {
-      out_vec[i] = silu_op(gate_vec[i]) * up_vec[i];
-    }
-    
-    // Store (CUDA: *reinterpret_cast<float4*>)
-    out_vec.store(0, sycl::multi_ptr<float, 
-                     sycl::access::address_space::global_space>(out_ptr + base));
-  }
-  
-  // Scalar tail (matches CUDA logic exactly)
-  for (int i = num_vec * VEC_SIZE + tid; i < d; i += block_size) {
-    out_ptr[i] = silu_op(gate[i]) * up[i];
-  }
-}
+The complete SYCL kernel (shown in B.1 side-by-side comparison) includes:
+
+1. ✅ **Kernel signature** with SYCL free-function annotations
+2. ✅ **Thread indexing** via `get_nd_item<1>()`
+3. ✅ **Vectorized path** using `sycl::vec<float, 4>` with `.load()` / `.store()`
+4. ✅ **Scalar tail** for handling `d % 4 != 0` cases
+5. ✅ **Identical algorithm** to CUDA: process 1 token per work-group with 512 threads
+
+**Key implementation details**:
+- Template parameter: `VEC_SIZE = 4` (fixed, matches CUDA)
+- Vector type: `sycl::vec<float, VEC_SIZE>` (128-bit aligned)
+- SiLU function: `silu_op(x) = x / (1.0f + sycl::exp(-x))`
+- Memory access: Coalesced 128-bit loads/stores for bandwidth efficiency
+
+**Compilation**: Requires oneAPI 2025.0+ with free-function kernel support:
+```bash
+icpx -fsycl -O3 -fsycl-targets=spir64 silu_and_mul_xpu.cpp
 ```
 
 **Status**: ✅ **Semantically identical to vLLM CUDA kernel**, with Intel Xe hardware adaptations
 
-### B.4 PyTorch Integration
+### B.5 PyTorch Integration
 
 **Key implementation**:
 
