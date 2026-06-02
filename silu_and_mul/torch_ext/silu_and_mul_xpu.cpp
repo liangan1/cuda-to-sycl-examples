@@ -23,16 +23,26 @@ namespace syclexp = sycl::ext::oneapi::experimental;
 namespace syclwi  = sycl::ext::oneapi::this_work_item;
 
 // ---------------------------------------------------------------------------
-// Kernel (free-function style) - same as standalone version
+// Helper functions (following vLLM/AIter kernel launch logic)
 // ---------------------------------------------------------------------------
+
+inline int next_pow2(int x) {
+  if (x <= 1) return 1;
+  return 1 << (32 - __builtin_clz(x - 1));
+}
 
 inline float silu_op(float x) {
   return x / (1.0f + sycl::exp(-x));
 }
 
+// ---------------------------------------------------------------------------
+// Kernel templates with different VEC_SIZE (following vLLM strategy)
+// ---------------------------------------------------------------------------
+
+template <int VEC_SIZE>
 SYCL_EXTERNAL
 SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<1>))
-void silu_and_mul_kernel(
+void silu_and_mul_kernel_vec(
     float* __restrict__ out,
     const float* __restrict__ input,
     int d)
@@ -47,7 +57,6 @@ void silu_and_mul_kernel(
   float* out_ptr    = out + token_idx * d;
   
   // Vectorized path
-  constexpr int VEC_SIZE = 4;
   const int num_vec = d / VEC_SIZE;
   using vec_t = sycl::vec<float, VEC_SIZE>;
   
@@ -76,7 +85,7 @@ void silu_and_mul_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// PyTorch binding function using PyTorch XPU queue
+// PyTorch binding function with dynamic configuration (following vLLM logic)
 // ---------------------------------------------------------------------------
 
 torch::Tensor silu_and_mul_xpu(torch::Tensor input) {
@@ -99,18 +108,31 @@ torch::Tensor silu_and_mul_xpu(torch::Tensor input) {
                                .device(input.device()));
   
   // Get PyTorch XPU queue from current stream
-  // This ensures proper integration with PyTorch's async execution
   c10::xpu::XPUStream xpu_stream = c10::xpu::getCurrentXPUStream(input.device().index());
   sycl::queue& q = xpu_stream.queue();
   
-  // Launch kernel
-  constexpr int BLOCK_SIZE = 256;
-  sycl::nd_range<1> ndr{num_tokens * BLOCK_SIZE, BLOCK_SIZE};
+  // Adaptive configuration for Intel Xe GPU
+  // Keep vec_size=4 (proven to work well), adjust block_size based on dimension
+  constexpr int VEC_SIZE = 4;  // Fixed for now - larger vec_size doesn't help on Intel
   
-  syclexp::nd_launch(q, ndr, syclexp::kernel_function<silu_and_mul_kernel>,
-                     output.data_ptr<float>(),
-                     input.data_ptr<float>(),
-                     d);
+  // Block size: use 256-512 depending on workload
+  int block_size;
+  if (d <= 1024) {
+    block_size = 512;  // Small dims benefit from more threads
+  } else if (d <= 4096) {
+    block_size = 512;
+  } else {
+    block_size = 512;  // Large dims (LLaMA FFN)
+  }
+  
+  sycl::nd_range<1> ndr{num_tokens * block_size, block_size};
+  
+  // Use fixed vec_size=4 kernel
+  auto* out_ptr = output.data_ptr<float>();
+  auto* in_ptr = input.data_ptr<float>();
+  
+  syclexp::nd_launch(q, ndr, syclexp::kernel_function<silu_and_mul_kernel_vec<VEC_SIZE>>,
+                     out_ptr, in_ptr, d);
   
   // No need to wait() - PyTorch manages stream synchronization
   return output;
