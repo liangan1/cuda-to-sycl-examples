@@ -1,0 +1,20 @@
+
+=== Device Timing Summary ===
+
+                Total Execution Time (ns):           9138826237
+    Total Device Time for L0 backend (ns):           7773914956
+
+== L0 Backend ==
+
+                                                                                                                                                                                                 Kernel,        Calls,            Time (ns),     Time (%),         Average (ns),             Min (ns),             Max (ns)
+                                                                                                                             "void __sycl_kernel_silu_and_mul_kernel_vec<4>(float*, float const*, int)",          110,           7665610165,    98.606819,             69687365,             69060625,             76715000
+"at::native::xpu::DistributionElementwiseKernelFunctor<float, float, 4, at::native::templates::xpu::Normal4DistributionFunctor, at::native::templates::xpu::NormalTransformFunctor<float, float>, int>",            2,            108304791,     1.393182,             54152395,             45261250,             63043541
+
+
+=== Kernel Properties ===
+
+                                                                                                                                                                                                 Kernel, Compiled, SIMD, Number of Arguments, SLM Per Work Group, Private Memory Per Thread, Spill Memory Per Thread, Register File Size Per Thread
+                                                                                                                             "void __sycl_kernel_silu_and_mul_kernel_vec<4>(float*, float const*, int)",      JIT,   32,                   3,                  0,                         0,                       0,                       unknown
+"at::native::xpu::DistributionElementwiseKernelFunctor<float, float, 4, at::native::templates::xpu::Normal4DistributionFunctor, at::native::templates::xpu::NormalTransformFunctor<float, float>, int>",      AOT,   32,                   5,                  0,                         0,                       0,                       unknown
+
+

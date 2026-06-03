@@ -17,8 +17,11 @@ setup(
                     '-O3',
                     '-fsycl-targets=spir64',
                     '-std=c++17',
-                    '-march=native',  # Enable native CPU instructions
-                    '-ffast-math',    # Aggressive math optimizations
+                    '-march=native',
+                    '-ffast-math',
+                    '-funroll-loops',
+                    '-finline-functions',
+                    '-fno-math-errno',
                 ]
             },
             extra_link_args=['-fsycl', '-fsycl-targets=spir64'],
