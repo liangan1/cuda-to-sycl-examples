@@ -6,7 +6,7 @@ model, math, indexing, and memory model all map one-to-one; only µarch tuning
 constants change. **All contents in this repo are gernated by AI**. 
 
 ## Usage 
-You can use the skills/SKILLS.md to translate the CUDA elementwise kernel into the sycl. a refrence ben found in [silu_and_mul_verify](https://github.com/liangan1/cuda-to-sycl-examples/tree/main/silu_and_mul_verify)
+You can use the skills/SKILLS.md to translate the CUDA elementwise kernel into the sycl. a refrence be found in [silu_and_mul_verify](https://github.com/liangan1/cuda-to-sycl-examples/tree/main/silu_and_mul_verify)
 
 ## CUDA <-> SYCL Mapping (Line-by-Line, Two Columns)
 
